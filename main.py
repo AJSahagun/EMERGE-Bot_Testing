@@ -6,6 +6,7 @@ import concurrent.futures
 import argparse
 import os
 from dotenv import find_dotenv, load_dotenv
+from datetime import datetime, timezone
 
 # Set-up env var
 dotenv_path = find_dotenv()
@@ -159,7 +160,7 @@ def run_single_test(dataset):
     print(random_incident)
 
     start_time = time.time()
-    success = complete_conversation_flow(random_incident, show_history=True)
+    success = complete_conversation_flow(random_incident, show_history=False)
     elapsed_time = time.time() - start_time
 
     if success:
@@ -168,7 +169,7 @@ def run_single_test(dataset):
         print("Test failed.")
 
 
-def run_load_test(dataset, duration_minutes=60, requests_per_minute=600):
+def run_load_test(dataset, duration_minutes=30, requests_per_minute=600):
     if dataset is None or len(dataset) == 0:
         print("No data available in the dataset.")
         return
@@ -197,7 +198,7 @@ def run_load_test(dataset, duration_minutes=60, requests_per_minute=600):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         request_count = 0
-        # batch_start_time = time.time()
+        batch_start_time = time.time()
 
         while time.time() < end_time and (successful_requests + failed_requests) < total_requests:
             # Throttle submission rate to match target RPM
@@ -225,20 +226,22 @@ def run_load_test(dataset, duration_minutes=60, requests_per_minute=600):
                         failed_requests += 1
 
                 # Throttle and progress reporting
-                # batch_elapsed = time.time() - batch_start_time
+                batch_elapsed = time.time() - batch_start_time
                 current_minute = int(elapsed_time // 60)
 
                 print(f"Minute {current_minute + 1}/{duration_minutes} - "
                       f"Successful: {successful_requests}, Failed: {failed_requests}, "
                       f"Submitted: {request_count}/{total_requests}")
 
-                # batch_start_time = time.time()
+                batch_start_time = time.time()
 
             # Prevent CPU over utilization while waiting for the right time to send the next batch
             time.sleep(0.1)
 
     total_time = time.time() - start_time
     print("\nLoad test completed")
+    print(f"Start time: {datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat()}")
+    print(f"End time: {datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()}")
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Successful requests: {successful_requests} ({successful_requests / total_requests:.1%})")
     print(f"Failed requests: {failed_requests} ({failed_requests / total_requests:.1%})")
@@ -251,8 +254,8 @@ def main():
                         help='Test mode: single for one test, load for load testing')
     parser.add_argument('--file', default='EMERGE_SyntheticData-sample-data_botRequest-Trimmed.csv',
                         help='Path to the CSV dataset file')
-    parser.add_argument('--duration', type=int, default=60,
-                        help='Duration of load test in minutes (default: 60)')
+    parser.add_argument('--duration', type=int, default=30,
+                        help='Duration of load test in minutes (default: 30)')
     parser.add_argument('--rpm', type=int, default=600,
                         help='Requests per minute for load testing (default: 600)')
     parser.add_argument('--process-time', type=int, default=30,
