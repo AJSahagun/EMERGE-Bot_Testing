@@ -192,7 +192,7 @@ def run_load_test(dataset, duration_minutes=30, requests_per_minute=600):
     # For 600 RPM (10 per second) with 30-second processes, we need 300 concurrent workers
     # Formula: workers = rate_per_second * process_time
     max_workers = int(requests_per_second * PROCESS_TIME) + 50  # Add buffer
-    batch_size = min(max_workers, 300)  # Limit batch size to prevent overwhelming system
+    batch_size = min(max_workers, 300)
 
     print(f"Using {max_workers} concurrent workers with batch size {batch_size}")
 
