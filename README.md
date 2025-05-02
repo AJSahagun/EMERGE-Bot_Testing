@@ -1,15 +1,16 @@
 # EMERGE Objective 2 Testing
 
-A tool for load testing EMERGE chatbot for objective 2 by simulating concurrent user conversations.
+A tool for load testing EMERGE chatbot for objective 2 by simulating concurrent user conversations with peak load capabilities.
 
 ## Overview
 
 This tool allows you to:
 
 1. Run single conversation tests to verify functionality
-2. Perform load tests with configurable concurrency to test system capacity
-3. Simulate hundreds of users interacting with your chatbot simultaneously
-4. Generate detailed performance metrics
+2. Perform **peak load tests** with configurable ramp-up periods
+3. Simulate thousands of users with realistic conversation patterns
+4. Generate detailed performance metrics with real-time monitoring
+5. Automatically handle rate limiting with retry logic
 
 ## Requirements
 
@@ -18,6 +19,7 @@ This tool allows you to:
   - requests
   - pandas
   - python-dotenv
+  - concurrent.futures
 
 ## Installation
 
@@ -42,26 +44,30 @@ This tool allows you to:
 ### Running a Single Test
 
 To run a single test conversation with random data from your dataset:
-
 ```bash
-python main.py --mode single --file your_dataset.csv
+python main.py --mode single --file EMERGE_SyntheticData-sample-data_botRequest.csv
 ```
 
-### Running a Load Test
-
-To run a load test with 600 requests per minute for 1 hour:
-
+### Running a Peak Load Test
+To run a 20-minute test with 15-minute ramp-up to 600 RPM and 5-minute peak:
 ```bash
-python main.py --mode load --file your_dataset.csv --rpm 600 --duration 60
+python main.py --mode load --file EMERGE_SyntheticData-sample-data_botRequest.csv \
+  --ramp-up 15 \
+  --peak-duration 5 \
+  --peak-rpm 600
 ```
 
 ### Command Line Options
-
-- `--mode`: Test mode (`single` or `load`)
-- `--file`: Path to your CSV dataset
-- `--duration`: Duration of load test in minutes (default: 60)
-- `--rpm`: Requests per minute for load testing (default: 600)
-- `--process-time`: Average time (in seconds) for one complete conversation flow (default: 30)
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--mode` | Test mode (`single` or `load`) | `single` |
+| `--file` | Path to CSV dataset | `dataset.csv` |
+| `--ramp-up` | Ramp-up duration in minutes | 15 |
+| `--peak-duration` | Peak duration in minutes | 5 |
+| `--peak-rpm` | Target peak requests per minute | 600 |
+| `--process-time` | Avg conversation time (seconds) | 30 |
+| `--machine-id` | Machine ID for distributed testing | 0 |
+| `--total-machines` | Total machines in distributed setup | 1 |
 
 ## Input Dataset Format
 
@@ -75,28 +81,32 @@ The tool expects a CSV file with the following columns:
 - `address`: Address of the incident
 - `landmark`: Nearby landmark
 
-Example:
-```
-name,phoneNumber,dateAndTime,incidentType,incidentSubType,reportDescription,address,landmark
-Juan Dela Cruz,09123456789,2023-01-01 10:00,Fire,House Fire,Small fire in kitchen,123 Main St,Near City Hall
-```
+**Note:** The tool automatically handles small datasets by repeating entries as needed.
 
 ## Key Features
 
-- **Configurable Concurrency**: Automatically calculates the optimal number of threads based on process time and target RPM
-- **Detailed Metrics**: Provides success rate, failure rate, and effective RPM at the end of testing
-- **Progress Monitoring**: Shows real-time progress during load testing
-- **Realistic Conversation Flow**: Simulates complete user conversations including language selection and data input
+- **Peak Load Testing**: Simulate gradual ramp-up followed by sustained peak traffic
+- **Smart Retry Logic**: Automatic retries with exponential backoff for failed requests
+- **Real-time Monitoring**: Live RPM tracking and progress updates every 5 seconds
+- **Distributed Testing**: Support for multi-machine load generation
+- **Conversation Realism**: 
+  - 11 API calls per conversation
+  - Natural request spacing (2s between messages)
+  - Full conversation lifecycle simulation
 
 ## Performance Considerations
 
-- For 600 RPM with 30-second conversation flows, approximately 300 concurrent workers are needed
-- Adjust the `--process-time` parameter if your average conversation duration changes
-- Monitor system resources during testing as high concurrency can be resource-intensive
+- **Hidden Requests**: Each conversation generates 11 API calls (1 user + 1 conversation + 9 messages)
+- **Rate Limit Calculation**: 
+  ```python
+  Safe RPM = (100 RPS * 60) / 11 ≈ 545 RPM
+  ```
+- **Resource Guidelines**:
+  - 600 RPM requires ~5 machines (depending on specs)
+  - 8GB RAM/node recommended for high load tests
+  - Network bandwidth: ~1MB/s per 1000 RPM
 
-## Troubleshooting
 
-If you encounter rate limiting or connection errors:
-- Reduce the RPM target
-- Increase the REQUEST_INTERVAL constant in the code
-- Ensure your system has sufficient resources for the desired concurrency
+### Dataset Limitations
+- The tool automatically handles datasets smaller than required test size
+- Minimum recommended dataset: 50 unique records

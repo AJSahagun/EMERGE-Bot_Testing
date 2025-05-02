@@ -15,8 +15,11 @@ load_dotenv(dotenv_path)
 # Constants
 WEBHOOK_URL_KEY = os.getenv("WEBHOOK_URL_KEY")
 BASE_URL = f"https://chat.botpress.cloud/{WEBHOOK_URL_KEY}"
-REQUEST_INTERVAL = 2  # 2-second interval between requests
-PROCESS_TIME = 30  # 30 seconds average per conversation flow
+REQUEST_INTERVAL = 2  # seconds interval between requests
+PROCESS_TIME = 30  # seconds average per conversation flow
+MAX_RETRIES = 3
+INITIAL_BACKOFF = 1  # seconds
+HIDDEN_MULTIPLIER = 11
 
 
 def load_dataset(file_path):
@@ -169,54 +172,77 @@ def run_single_test(dataset):
         print("Test failed.")
 
 
-def run_load_test(dataset, duration_minutes=30, requests_per_minute=600):
+def execute_with_retry(fn, *args):
+    for attempt in range(MAX_RETRIES):
+        result = fn(*args)
+        if result is not None:
+            return True
+        time.sleep(INITIAL_BACKOFF * (2 ** attempt))
+    return False
+
+
+def run_load_test(dataset, ramp_duration_minutes=15, peak_duration_minutes=5, peak_rpm=600):
     if dataset is None or len(dataset) == 0:
         print("No data available in the dataset.")
         return
 
-    print(f"Starting load test: {requests_per_minute} requests per minute for {duration_minutes} minutes")
+    total_duration_minutes = ramp_duration_minutes + peak_duration_minutes
+    print(f"Starting peak load test: {ramp_duration_minutes} minutes ramp-up to {peak_rpm} RPM, "
+          f"followed by {peak_duration_minutes} minutes peak")
 
-    total_requests = duration_minutes * requests_per_minute
-    requests_per_second = requests_per_minute / 60
+    # Calculate total requests
+    ramp_duration_seconds = ramp_duration_minutes * 60
+    total_requests_ramp = int((peak_rpm * ramp_duration_seconds) / 120)  # Integral of linear ramp-up
+    total_requests_peak = peak_rpm * peak_duration_minutes
+    total_requests = total_requests_ramp + total_requests_peak
 
+    # Prepare dataset
     full_dataset = pd.concat([dataset] * (total_requests // len(dataset) + 1))
-    full_dataset = full_dataset.sample(n=total_requests, replace=False)
+    full_dataset = full_dataset.sample(n=total_requests, replace=True)
     incident_data_list = full_dataset.to_dict('records')
 
     successful_requests = 0
     failed_requests = 0
     start_time = time.time()
-    end_time = start_time + (duration_minutes * 60)
+    end_time = start_time + (total_duration_minutes * 60)
 
-    # Calculate required concurrency based on 30-second process time
-    # For 600 RPM (10 per second) with 30-second processes, we need 300 concurrent workers
-    # Formula: workers = rate_per_second * process_time
-    max_workers = int(requests_per_second * PROCESS_TIME) + 50  # Add buffer
-    batch_size = min(max_workers, 300)
+    # Calculate max workers based on peak RPM
+    peak_rps = peak_rpm / 60
+    max_workers = int(peak_rps * PROCESS_TIME) + 50  # Buffer
+    batch_size = min(max_workers, 100)
 
     print(f"Using {max_workers} concurrent workers with batch size {batch_size}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         request_count = 0
-        batch_start_time = time.time()
+        last_report_time = time.time()
 
-        while time.time() < end_time and (successful_requests + failed_requests) < total_requests:
-            # Throttle submission rate to match target RPM
+        while time.time() < end_time and request_count < total_requests:
             current_time = time.time()
             elapsed_time = current_time - start_time
-            target_requests = int(elapsed_time * requests_per_second)
-            requests_to_send = target_requests - request_count
+
+            # Calculate target requests based on elapsed time
+            if elapsed_time <= ramp_duration_seconds:
+                # Ramp-up phase
+                current_rpm = (peak_rpm / ramp_duration_seconds) * elapsed_time
+                target_requests = int((peak_rpm * elapsed_time ** 2) / (2 * ramp_duration_seconds * 60))
+            else:
+                # Peak phase
+                current_rpm = peak_rpm
+                peak_elapsed = min(elapsed_time - ramp_duration_seconds, peak_duration_minutes * 60)
+                target_requests = total_requests_ramp + int(peak_rpm * peak_elapsed / 60)
+
+            requests_to_send = max(0, target_requests - request_count)
 
             if requests_to_send > 0:
                 # Submit batch of requests
                 batch = min(requests_to_send, batch_size, total_requests - request_count)
                 futures = []
 
-                for i in range(batch):
-                    if request_count < total_requests:
-                        incident_data = incident_data_list[request_count]
-                        futures.append(executor.submit(complete_conversation_flow, incident_data))
-                        request_count += 1
+                for _ in range(batch):
+                    incident_data = incident_data_list[request_count]
+                    futures.append(executor.submit(execute_with_retry, complete_conversation_flow, incident_data))
+                    request_count += 1
 
                 # Process completed futures
                 for future in concurrent.futures.as_completed(futures):
@@ -225,18 +251,17 @@ def run_load_test(dataset, duration_minutes=30, requests_per_minute=600):
                     else:
                         failed_requests += 1
 
-                # Throttle and progress reporting
-                batch_elapsed = time.time() - batch_start_time
+            # Progress reporting every 5 seconds
+            if current_time - last_report_time >= 5:
                 current_minute = int(elapsed_time // 60)
+                print(f"[{current_minute:02d}:{int(elapsed_time % 60):02d}] "
+                      f"RPM: {current_rpm:.0f} | "
+                      f"Sent: {request_count}/{total_requests} | "
+                      f"Success: {successful_requests} | "
+                      f"Failed: {failed_requests}")
+                last_report_time = current_time
 
-                print(f"Minute {current_minute + 1}/{duration_minutes} - "
-                      f"Successful: {successful_requests}, Failed: {failed_requests}, "
-                      f"Submitted: {request_count}/{total_requests}")
-
-                batch_start_time = time.time()
-
-            # Prevent CPU over utilization while waiting for the right time to send the next batch
-            time.sleep(0.1)
+            time.sleep(0.1)  # Prevent CPU overuse
 
     total_time = time.time() - start_time
     print("\nLoad test completed")
@@ -254,10 +279,12 @@ def main():
                         help='Test mode: single for one test, load for load testing')
     parser.add_argument('--file', default='EMERGE_SyntheticData-sample-data_botRequest-Trimmed.csv',
                         help='Path to the CSV dataset file')
-    parser.add_argument('--duration', type=int, default=30,
-                        help='Duration of load test in minutes (default: 30)')
-    parser.add_argument('--rpm', type=int, default=600,
-                        help='Requests per minute for load testing (default: 600)')
+    parser.add_argument('--ramp-up', type=int, default=15,
+                        help='Ramp-up duration in minutes (default: 15)')
+    parser.add_argument('--peak-duration', type=int, default=5,
+                        help='Peak duration in minutes (default: 5)')
+    parser.add_argument('--peak-rpm', type=int, default=600,
+                        help='Peak requests per minute (default: 600)')
     parser.add_argument('--process-time', type=int, default=30,
                         help='Average process time per conversation in seconds (default: 30)')
 
@@ -274,7 +301,12 @@ def main():
     if args.mode == 'single':
         run_single_test(dataset)
     else:
-        run_load_test(dataset, args.duration, args.rpm)
+        run_load_test(
+            dataset,
+            ramp_duration_minutes=args.ramp_up,
+            peak_duration_minutes=args.peak_duration,
+            peak_rpm=args.peak_rpm
+        )
 
 
 if __name__ == "__main__":
